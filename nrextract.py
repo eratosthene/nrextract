@@ -91,7 +91,8 @@ if __name__ == "__main__":
         for q in queries:
             print(f'Running query for {q["name"]}')
             jsondata = nerdgraph_nrql(newrelic_account_id, newrelic_user_key, q['query'])
-            print(f'Query returned {len(jsondata)} results.')
+            data=json.loads(jsondata)
+            print(f'Query returned {len(data)} results.')
             filename = f'{q["name"]}.json'
             filepath = os.path.join(tmpdirname, filename)
             print(f'Writing file "{filepath}"')
