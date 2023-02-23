@@ -1,27 +1,73 @@
 #!/usr/bin/env python
-import requests, argparse, tempfile, json, os, uuid
+import requests, argparse, tempfile, json, os, uuid, time
 from azure.identity import DefaultAzureCredential
 from azure.storage.blob import BlobServiceClient, BlobClient, ContainerClient
 from config import newrelic_user_key, newrelic_account_id, azure_connection_string, azure_container, queries
 
 def nerdgraph_nrql(anum, key, q):
-  query = """
-  {
-    actor { account(id: %s)
-      { nrql
-      (query: "%s", timeout: 30)
-      { results } } }
-  }""" % (anum, q)
+    query = """
+    {
+      actor {
+        account(id: %s) {
+          nrql(query: "%s", async: true) {
+            results
+            queryProgress {
+              queryId
+              completed
+              retryAfter
+              retryDeadline
+              resultExpiration
+            }
+          }
+        }
+      }
+    }""" % (anum, q)
 
-  endpoint = "https://api.newrelic.com/graphql"
-  headers = {'API-Key': f'{key}'}
-  response = requests.post(endpoint, headers=headers, json={"query": query})
+    endpoint = "https://api.newrelic.com/graphql"
+    headers = {'API-Key': f'{key}'}
+    response = requests.post(endpoint, headers=headers, json={"query": query})
 
-  if response.status_code == 200:
-    dict_response = json.loads(response.content)
-    return json.dumps(dict_response, indent=4)
-  else:
-      raise Exception(f'Nerdgraph query failed with a {response.status_code}.')
+    if response.status_code == 200:
+        dict_response = json.loads(response.content)['data']['actor']['account']['nrql']
+        if dict_response['queryProgress']['completed']:
+            return json.dumps(dict_response['results'], indent=4)
+        else:
+            print("Query requires more time to complete, waiting for results...")
+            completed = False
+            retryAfter = dict_response['queryProgress']['retryAfter']
+            queryid = dict_response['queryProgress']['queryId']
+            print(f'queryId is {queryid}')
+            query = """
+            {
+              actor {
+                account(id: %s) {
+                  nrqlQueryProgress(queryId: "%s") {
+                    results
+                    queryProgress {
+                      queryId
+                      completed
+                      retryAfter
+                      retryDeadline
+                      resultExpiration
+                    }
+                  }
+                }
+              }
+            }""" % (anum, queryid)
+            while not completed:
+                print(f'Sleeping for {retryAfter} seconds...')
+                time.sleep(retryAfter)
+                response = requests.post(endpoint, headers=headers, json={"query": query})
+                if response.status_code == 200:
+                    dict_response = json.loads(response.content)['data']['actor']['account']['nrqlQueryProgress']
+                    completed = dict_response['queryProgress']['completed']
+                    retryAfter = dict_response['queryProgress']['retryAfter']
+                    if completed:
+                        return json.dumps(dict_response['results'], indent=4)
+                else:
+                    raise Exception(f'Nerdgraph query failed with a {response.status_code}.')
+    else:
+        raise Exception(f'Nerdgraph query failed with a {response.status_code}.')
 
 
 if __name__ == "__main__":
@@ -45,6 +91,7 @@ if __name__ == "__main__":
         for q in queries:
             print(f'Running query for {q["name"]}')
             jsondata = nerdgraph_nrql(newrelic_account_id, newrelic_user_key, q['query'])
+            print(f'Query returned {len(jsondata)} results.')
             filename = f'{q["name"]}.json'
             filepath = os.path.join(tmpdirname, filename)
             print(f'Writing file "{filepath}"')
@@ -59,4 +106,4 @@ if __name__ == "__main__":
 
     except Exception as ex:
         print('Exception:')
-        print(ex)
+        print(repr(ex))
